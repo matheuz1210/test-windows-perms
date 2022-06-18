@@ -4,8 +4,8 @@ use winapi::{
     shared::minwindef::DWORD,
     um::winnt::{
         CONTAINER_INHERIT_ACE, FAILED_ACCESS_ACE_FLAG, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE,
-        FILE_GENERIC_READ, FILE_GENERIC_WRITE, INHERITED_ACE, OBJECT_INHERIT_ACE,
-        SUCCESSFUL_ACCESS_ACE_FLAG,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, INHERITED_ACE, INHERIT_ONLY_ACE,
+        NO_PROPAGATE_INHERIT_ACE, OBJECT_INHERIT_ACE, PSID, SUCCESSFUL_ACCESS_ACE_FLAG,
     },
 };
 use windows_acl::acl::ACL;
@@ -20,11 +20,29 @@ enum Error {
 }
 impl From<DWORD> for Error {
     fn from(code: DWORD) -> Self {
-        Error::WindowsErrorCode(code)
+        let ioerror = IoError::from_raw_os_error(code as i32);
+
+        if ioerror.kind() != io::ErrorKind::Other {
+            Self::IoError(ioerror)
+        } else {
+            Self::WindowsErrorCode(code)
+        }
     }
 }
 
 type Result<T> = ::std::result::Result<T, Error>;
+
+fn current_user_sid() -> Result<(String, Vec<u8>)> {
+    let sid = windows_acl::helper::name_to_sid(
+        &windows_acl::helper::current_user().unwrap_or_default(),
+        None,
+    )?;
+
+    Ok((
+        windows_acl::helper::sid_to_string(sid.as_ptr() as PSID)?,
+        sid,
+    ))
+}
 
 fn print_acl_entries(acl: &ACL) -> Result<()> {
     let equals = "=".red();
@@ -42,7 +60,7 @@ fn print_acl_entries(acl: &ACL) -> Result<()> {
         writeln!(cerr, "{index} {}", entry.index.to_string().blue())?;
         writeln!(cerr, "{size} {}", entry.size.to_string().blue())?;
         writeln!(cerr, "{entry_type} {}", entry.entry_type.to_string().blue())?;
-        writeln!(cerr, "{sid} {}", entry.string_sid.to_string().blue(),)?;
+        writeln!(cerr, "{sid} {}", entry.string_sid.to_string().blue())?;
         {
             write!(
                 cerr,
@@ -52,20 +70,29 @@ fn print_acl_entries(acl: &ACL) -> Result<()> {
             if entry.flags == 0 {
                 write!(cerr, "None")?;
             } else {
-                if entry.flags & FAILED_ACCESS_ACE_FLAG == FAILED_ACCESS_ACE_FLAG {
-                    write!(cerr, " {}", "FailedAccess".blue())?;
-                }
-                if entry.flags & SUCCESSFUL_ACCESS_ACE_FLAG == SUCCESSFUL_ACCESS_ACE_FLAG {
-                    write!(cerr, " {}", "SuccessfulAccess".blue())?;
+                match (
+                    entry.flags & FAILED_ACCESS_ACE_FLAG == FAILED_ACCESS_ACE_FLAG,
+                    entry.flags & SUCCESSFUL_ACCESS_ACE_FLAG == SUCCESSFUL_ACCESS_ACE_FLAG,
+                ) {
+                    (true, true) => write!(cerr, " {}", "AuditAlways".blue())?,
+                    (true, false) => write!(cerr, " {}", "AuditFailedAccess".blue())?,
+                    (false, true) => write!(cerr, " {}", "AuditSuccessfulAccess".blue())?,
+                    _ => (),
                 }
                 if entry.flags & INHERITED_ACE == INHERITED_ACE {
                     write!(cerr, " {}", "Inherited".blue())?;
+                }
+                if entry.flags & INHERIT_ONLY_ACE == INHERIT_ONLY_ACE {
+                    write!(cerr, " {}", "InheritOnly".blue())?;
                 }
                 if entry.flags & OBJECT_INHERIT_ACE == OBJECT_INHERIT_ACE {
                     write!(cerr, " {}", "ObjectInherit".blue())?;
                 }
                 if entry.flags & CONTAINER_INHERIT_ACE == CONTAINER_INHERIT_ACE {
                     write!(cerr, " {}", "ContainerInherit".blue())?;
+                }
+                if entry.flags & NO_PROPAGATE_INHERIT_ACE == NO_PROPAGATE_INHERIT_ACE {
+                    write!(cerr, " {}", "NoPropagateInherit".blue())?;
                 }
             }
             writeln!(cerr,)?;
@@ -95,10 +122,10 @@ fn print_acl_entries(acl: &ACL) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let acl = dbg!(ACL::from_file_path(
-        &dirs::home_dir().unwrap_or_default().to_string_lossy(),
-        false
-    ))?;
+    let acl = ACL::from_file_path(
+        &std::env::args().nth(1).unwrap_or_else(|| ".".to_string()),
+        false,
+    )?;
 
     print_acl_entries(&acl)?;
     Ok(())
